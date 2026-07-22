@@ -1,13 +1,14 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import pandas as pd
 import yfinance as yf
+import pandas as pd
+import numpy as np
 import requests
 import os
 import asyncio
 from datetime import datetime, timezone
 
-app = FastAPI(title="Jio AI-Trading Engine")
+app = FastAPI(title="Jio AI Ultra-Institutional Trading Engine V3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,153 +18,198 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ASSET_UNIVERSE = {
-    "Solana (SOL)": "SOL-USD",
-    "Bitcoin (BTC)": "BTC-USD",
-    "XRP": "XRP-USD",
-    "Ethereum (ETH)": "ETH-USD",
-    "Shiba Inu (SHIB)": "SHIB-USD",
-    "Nifty 50": "^NSEI",
-    "Bank Nifty": "^NSEBANK"
-}
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-broadcast_history = {}
+ASSETS = [
+    {"symbol": "SOL-USD", "name": "Solana (SOL)", "type": "crypto"},
+    {"symbol": "BTC-USD", "name": "Bitcoin (BTC)", "type": "crypto"},
+    {"symbol": "ETH-USD", "name": "Ethereum (ETH)", "type": "crypto"},
+    {"symbol": "XRP-USD", "name": "XRP", "type": "crypto"},
+    {"symbol": "SHIB-USD", "name": "Shiba Inu (SHIB)", "type": "crypto"},
+    {"symbol": "^NSEI", "name": "Nifty 50", "type": "index"},
+    {"symbol": "^NSEBANK", "name": "Bank Nifty", "type": "index"},
+]
+
 latest_scan_cache = {}
+broadcast_history = {}
 
 def send_telegram_alert(message: str):
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if bot_token and chat_id:
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
-        try:
-            requests.post(url, json=payload, timeout=5)
-        except Exception:
-            pass
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        print("Telegram Alert Error:", e)
 
-def calculate_institutional_signal(df_5m):
-    if len(df_5m) < 35:
-        return 0, "INSUFFICIENT_DATA", 50, 0, False, 0
+def calculate_advanced_indicators(df):
+    df['EMA9'] = df['Close'].ewm(span=9, adjust=False).mean()
+    df['EMA21'] = df['Close'].ewm(span=21, adjust=False).mean()
+    df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
+    df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+
+    # RSI (14)
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean() + 1e-10
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+
+    # ATR (14)
+    high_low = df['High'] - df['Low']
+    high_close = np.abs(df['High'] - df['Close'].shift())
+    low_close = np.abs(df['Low'] - df['Close'].shift())
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df['ATR'] = tr.rolling(window=14).mean()
+
+    # ADX (14) - Trend Strength
+    up_move = df['High'] - df['High'].shift(1)
+    down_move = df['Low'].shift(1) - df['Low']
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    last_candle_time = df_5m.index[-2]
-    now_utc = datetime.now(timezone.utc)
-    if last_candle_time.tzinfo is None:
-        last_candle_time = last_candle_time.tz_localize('UTC')
-        
-    time_diff_minutes = (now_utc - last_candle_time).total_seconds() / 60.0
-    is_fresh = time_diff_minutes <= 12.0
-    
-    c5 = pd.Series(df_5m['Close'].values.flatten(), index=df_5m.index)
-    h5 = pd.Series(df_5m['High'].values.flatten(), index=df_5m.index)
-    l5 = pd.Series(df_5m['Low'].values.flatten(), index=df_5m.index)
-    v5 = pd.Series(df_5m['Volume'].values.flatten(), index=df_5m.index)
-    
-    delta = c5.diff()
-    gain = delta.where(delta > 0, 0).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean() + 1e-10
-    rsi = 100 - (100 / (1 + (gain / loss)))
-    cur_rsi = float(rsi.iloc[-2])
-    
-    ema9_val = float(c5.ewm(span=9, adjust=False).mean().iloc[-2])
-    ema21_val = float(c5.ewm(span=21, adjust=False).mean().iloc[-2])
-    
-    tr = pd.DataFrame([h5 - l5, abs(h5 - c5.shift(1)), abs(l5 - c5.shift(1))]).max()
-    atr = float(tr.rolling(14).mean().iloc[-2])
-    
-    vol_avg = float(v5.rolling(20).mean().iloc[-2])
-    cur_vol = float(v5.iloc[-2])
-    is_high_volume = cur_vol > (vol_avg * 1.05)
-    
-    signal = 0
-    reason = "Scanning Trend..."
-    
-    if ema9_val > ema21_val:
-        if cur_rsi > 68:
-            reason = "🛑 BUY BLOCKED: Overbought Top Zone (RSI > 68)"
-        elif cur_rsi < 42:
-            reason = "⚠️ BUY BLOCKED: Low Momentum"
-        elif not is_high_volume:
-            reason = "⚠️ BUY BLOCKED: Low Volume Fakeout"
-        else:
-            signal = 1
-            reason = "🚀 HIGH ACCURACY BUY SIGNAL!"
-            
-    elif ema9_val < ema21_val:
-        if cur_rsi < 32:
-            reason = "🛑 SELL BLOCKED: Oversold Bottom Zone (RSI < 32)"
-        elif cur_rsi > 58:
-            reason = "⚠️ SELL BLOCKED: Bearish Momentum Fading"
-        elif not is_high_volume:
-            reason = "⚠️ SELL BLOCKED: Low Volume Drift"
-        else:
-            signal = -1
-            reason = "💥 HIGH ACCURACY SELL SIGNAL!"
-            
-    return signal, reason, cur_rsi, atr, is_fresh, time_diff_minutes
+    tr_smooth = tr.rolling(window=14).sum()
+    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14).sum() / (tr_smooth + 1e-10))
+    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14).sum() / (tr_smooth + 1e-10))
+    dx = 100 * (np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10))
+    df['ADX'] = dx.rolling(window=14).mean()
+
+    # Volume Moving Average
+    df['Vol_SMA'] = df['Volume'].rolling(window=20).mean()
+
+    return df
+
+def process_institutional_signal(symbol: str, name: str, is_crypto: bool):
+    try:
+        # Fetch Multi-Timeframe Data (5m, 15m, 1h)
+        d5 = yf.download(symbol, period="3d", interval="5m", progress=False)
+        d15 = yf.download(symbol, period="5d", interval="15m", progress=False)
+        d1h = yf.download(symbol, period="10d", interval="1h", progress=False)
+
+        if d5.empty or len(d5) < 35 or d15.empty or d1h.empty:
+            return None
+
+        # Clean MultiIndex
+        for d in [d5, d15, d1h]:
+            if isinstance(d.columns, pd.MultiIndex):
+                d.columns = d.columns.get_level_values(0)
+
+        df5 = calculate_advanced_indicators(d5)
+        df15 = calculate_advanced_indicators(d15)
+        df1h = calculate_advanced_indicators(d1h)
+
+        l5, p5 = df5.iloc[-1], df5.iloc[-2]
+        l15 = df15.iloc[-1]
+        l1h = df1h.iloc[-1]
+
+        c_price = float(l5['Close'])
+        rsi = float(l5['RSI'])
+        atr = float(l5['ATR'])
+        adx = float(l5['ADX'])
+        vol = float(l5['Volume'])
+        vol_avg = float(l5['Vol_SMA'])
+
+        # Timeframe Confluences
+        macro_bullish = l1h['EMA9'] > l1h['EMA21']
+        macro_bearish = l1h['EMA9'] < l1h['EMA21']
+
+        mid_bullish = l15['EMA9'] > l15['EMA21']
+        mid_bearish = l15['EMA9'] < l15['EMA21']
+
+        vol_spike = vol >= (1.30 * vol_avg)
+        is_trending = adx > 20.0  # ADX Filter for Chop protection
+
+        signal = 0
+        reason = "SCANNING: Range Bound / Waiting for Institutional Liquidity"
+
+        # Signal Triggers
+        buy_cross = (p5['EMA9'] <= p5['EMA21']) and (l5['EMA9'] > l5['EMA21'])
+        sell_cross = (p5['EMA9'] >= p5['EMA21']) and (l5['EMA9'] < l5['EMA21'])
+
+        if not is_trending:
+            reason = "🛑 NO TRADE: Low ADX (SideMarket / Consolidation Zone)"
+        elif buy_cross:
+            if macro_bullish and mid_bullish and rsi < 68 and vol_spike:
+                signal = 1
+                reason = "🚀 ULTRA BUY: 1H + 15M Macro Confluence + Vol Spike!"
+            else:
+                reason = "⚠️ BUY BLOCKED: High Timeframe Resistance or Low Volume"
+        elif sell_cross:
+            if macro_bearish and mid_bearish and rsi > 32 and vol_spike:
+                signal = -1
+                reason = "💥 ULTRA SELL: 1H + 15M Bearish Order Block + Institutional Vol!"
+            else:
+                reason = "⚠️ SELL BLOCKED: Higher Timeframe Support Detected"
+
+        # Adaptive SL & TP Multipliers
+        sl_mult = 2.8 if is_crypto else 2.2
+        tp_mult = 5.6 if is_crypto else 4.4
+
+        p_fmt = ",.8f" if symbol == "SHIB-USD" else ",.2f"
+        sl = c_price - (sl_mult * atr) if signal == 1 else (c_price + (sl_mult * atr) if signal == -1 else c_price - atr)
+        tp = c_price + (tp_mult * atr) if signal == 1 else (c_price - (tp_mult * atr) if signal == -1 else c_price + atr)
+
+        res_data = {
+            "symbol": symbol,
+            "asset": name,
+            "price": f"{c_price:{p_fmt}}",
+            "raw_price": c_price,
+            "signal": signal,
+            "rsi": round(rsi, 1),
+            "adx": round(adx, 1),
+            "reason": reason,
+            "sl": f"{sl:{p_fmt}}",
+            "tp": f"{tp:{p_fmt}}"
+        }
+
+        latest_scan_cache[symbol] = res_data
+        return res_data
+
+    except Exception as e:
+        print(f"Error processing {symbol}: {e}")
+        return None
+
+@app.get("/")
+def root():
+    return {"status": "Online", "engine": "Jio AI Institutional V3 Engine"}
+
+@app.get("/api/signals")
+def get_signals():
+    results = []
+    for item in ASSETS:
+        res = process_institutional_signal(item["symbol"], item["name"], is_crypto=(item["type"] == "crypto"))
+        if res:
+            results.append(res)
+    return {"success": True, "count": len(results), "data": results}
 
 async def background_radar_scanner():
     while True:
-        for name, symbol in ASSET_UNIVERSE.items():
-            try:
-                df_raw = yf.download(tickers=symbol, period="2d", interval="5m", progress=False)
-                if df_raw is not None and not df_raw.empty and len(df_raw) > 35:
-                    if isinstance(df_raw.columns, pd.MultiIndex):
-                        df_raw.columns = df_raw.columns.get_level_values(0)
-                        
-                    sig, reason, rsi, atr, is_fresh, age = calculate_institutional_signal(df_raw)
-                    c_price = float(df_raw['Close'].values.flatten()[-1])
-                    p_fmt = ",.8f" if symbol == "SHIB-USD" else ",.2f"
-                    
-                    sl = c_price - (2.2 * atr) if sig == 1 else (c_price + (2.2 * atr) if sig == -1 else 0)
-                    tp = c_price + (4.4 * atr) if sig == 1 else (c_price - (4.4 * atr) if sig == -1 else 0)
-                    
-                    latest_scan_cache[symbol] = {
-                        "asset": name,
-                        "symbol": symbol,
-                        "price": f"{c_price:{p_fmt}}",
-                        "raw_price": c_price,
-                        "rsi": round(rsi, 1),
-                        "signal": sig,
-                        "reason": reason,
-                        "is_fresh": is_fresh,
-                        "candle_age_min": round(age, 1),
-                        "sl": f"{sl:{p_fmt}}" if sl != 0 else "-",
-                        "tp": f"{tp:{p_fmt}}" if tp != 0 else "-"
-                    }
-                    
-                    if is_fresh and sig != 0:
-                        action_type = "BUY" if sig == 1 else "SELL"
-                        candle_time_str = str(df_raw.index[-2])
-                        unique_key = f"{symbol}{action_type}{candle_time_str}"
-                        
-                        if broadcast_history.get(symbol) != unique_key:
-                            icon = "🚀" if sig == 1 else "💥"
-                            msg = (
-                                f"{icon} JIO SUPER AI-PRECISION {action_type} ALERT\n"
-                                f"━━━━━━━━━━━━━━━━━━━━\n"
-                                f"📊 Asset: {name}\n"
-                                f"🟩 Spot Entry: {c_price:{p_fmt}}\n"
-                                f"🛑 Dynamic SL: {sl:{p_fmt}}\n"
-                                f"🎯 Target (1:2.0): {tp:{p_fmt}}\n"
-                                f"📈 RSI Value: {rsi:.1f}\n"
-                                f"⏰ Generated: Just now ({age:.1f}m ago)\n"
-                                f"━━━━━━━━━━━━━━━━━━━━\n"
-                                f"🤖 FastAPI Background Radar Engine"
-                            )
-                            send_telegram_alert(msg)
-                            broadcast_history[symbol] = unique_key
-            except Exception:
-                pass
-        await asyncio.sleep(30)
+        for item in ASSETS:
+            res = process_institutional_signal(item["symbol"], item["name"], is_crypto=(item["type"] == "crypto"))
+            if res and res["signal"] != 0:
+                sig_type = "BUY" if res["signal"] == 1 else "SELL"
+                unique_key = f"{res['symbol']}{sig_type}{res['price']}"
+                
+                if broadcast_history.get(res['symbol']) != unique_key:
+                    icon = "🚀" if res["signal"] == 1 else "💥"
+                    msg = (
+                        f"{icon} <b>JIO AI ULTRA-ACCURATE {sig_type} SIREN</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📊 <b>Asset:</b> {res['asset']}\n"
+                        f"🟩 <b>Entry Price:</b> ${res['price']}\n"
+                        f"🛑 <b>Adaptive SL:</b> ${res['sl']}\n"
+                        f"🎯 <b>Target (1:2.0+):</b> ${res['tp']}\n"
+                        f"📈 <b>ADX Trend Power:</b> {res['adx']}\n"
+                        f"🔥 <b>Reason:</b> {res['reason']}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🤖 <i>Institutional SMC Radar V3 Engine</i>"
+                    )
+                    send_telegram_alert(msg)
+                    broadcast_history[res['symbol']] = unique_key
+        await asyncio.sleep(20)
 
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(background_radar_scanner())
-
-@app.get("/")
-def home():
-    return {"status": "online", "message": "Jio AI-Trading FastAPI Engine Running"}
-
-@app.get("/api/signals")
-def get_signals():
-    return {"success": True, "data": list(latest_scan_cache.values())}

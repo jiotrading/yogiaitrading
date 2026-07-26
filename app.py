@@ -5,11 +5,11 @@ import pandas as pd
 import numpy as np
 import requests
 import os
-import asyncio
 import json
+import asyncio
 from datetime import datetime
 
-app = FastAPI(title="Jio AI Ultra Engine V10.0 - Super Updated")
+app = FastAPI(title="Jio AI Ultra Engine V11.0 - Complete Power")
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,17 +37,15 @@ def save_history(entry):
     history = load_history()
     history.append(entry)
     with open(HISTORY_FILE, 'w') as f:
-        json.dump(history[-15000:], f)
+        json.dump(history[-20000:], f)
 
-def send_telegram_alert(message: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-    try:
-        requests.post(url, json=payload, timeout=8)
-    except:
-        pass
+def send_telegram(message: str):
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        try:
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                          json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
+        except:
+            pass
 
 def calculate_indicators(df):
     df = df.copy()
@@ -73,9 +71,8 @@ def calculate_indicators(df):
 
 def generate_signal(asset):
     try:
-        df = yf.download(asset["symbol"], period="10d", interval="5m", progress=False)
-        if len(df) < 120:
-            return None
+        df = yf.download(asset["symbol"], period="12d", interval="5m", progress=False)
+        if len(df) < 150: return None
             
         df = calculate_indicators(df)
         latest = df.iloc[-1]
@@ -89,13 +86,12 @@ def generate_signal(asset):
             score += 18
         if latest['Stoch'] < 35:
             score += 12
-        if latest['Volume'] > latest['Vol_SMA'] * 1.5:
+        if latest['Volume'] > latest['Vol_SMA'] * 1.55:
             score += 20
         
         confidence = max(35, min(98, score))
         
-        if confidence < 73:
-            return None
+        if confidence < 73: return None
         
         price = float(latest['Close'])
         atr = float(latest['ATR'])
@@ -109,31 +105,31 @@ def generate_signal(asset):
             "confidence": int(confidence),
             "sl": round(price - (2.8 * atr) if is_buy else price + (2.8 * atr), 4),
             "tp": round(price + (6.8 * atr) if is_buy else price - (6.8 * atr), 4),
-            "reason": "Strong Multi-Indicator Setup"
+            "reason": "Multi-Indicator Strong Confluence",
+            "grade": "ELITE" if confidence > 80 else "HIGH"
         }
         
         save_history(entry)
         
-        # Telegram Alert
+        # Beautiful Telegram Alert
         if confidence >= 75:
             msg = f"""
-🚨 <b>JIO AI ULTRA V10.0</b> 🚨
+🚨 <b>JIO AI ULTRA V11.0</b> 🚨
 Asset: <b>{entry['asset']}</b>
-Signal: <b>{entry['signal']}</b>
+Signal: <b>{entry['signal']}</b> | Grade: <b>{entry['grade']}</b>
 Price: <b>{entry['price']}</b>
 Confidence: <b>{entry['confidence']}%</b>
-SL: {entry['sl']}
-TP: {entry['tp']}
+Stop Loss: {entry['sl']}
+Target: {entry['tp']}
 Reason: {entry['reason']}
+Time: {entry['timestamp']}
             """
-            send_telegram_alert(msg)
+            send_telegram(msg)
         
         return entry
-    except Exception as e:
-        print(f"Error in {asset['symbol']}: {e}")
+    except:
         return None
 
-# Assets
 ASSETS = [
     {"symbol": "BTC-USD", "name": "Bitcoin"},
     {"symbol": "ETH-USD", "name": "Ethereum"},
@@ -144,7 +140,7 @@ ASSETS = [
 
 @app.get("/")
 def root():
-    return {"status": "Jio AI Ultra Engine V10.0 Running ✅"}
+    return {"status": "Jio AI Ultra Engine V11.0 - Fully Loaded ✅", "success": True}
 
 @app.get("/api/signals")
 def get_signals():
@@ -155,13 +151,15 @@ def get_signals():
             results.append(res)
     return {"success": True, "count": len(results), "data": results}
 
-# Background Task
-async def background_radar():
+@app.get("/api/history")
+def get_history(limit: int = 100):
+    history = load_history()
+    return {"success": True, "total": len(history), "data": history[-limit:]}
+
+async def background_scanner():
     while True:
-        await asyncio.sleep(180)  # Har 3 minute
+        await asyncio.sleep(180)
 
 @app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(background_radar())
-
-print("✅ V10.0 Loaded Successfully!")
+async def startup():
+    asyncio.create_task(background_scanner())

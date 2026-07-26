@@ -6,11 +6,10 @@ import numpy as np
 import yfinance as yf
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from concurrent.futures import ThreadPoolExecutor
 
-app = FastAPI(title="Jio Institutional AI Trading Engine V4.0")
+app = FastAPI(title="Jio Institutional AI Trading Engine V4.1")
 
-# CORS Setup for Vercel
+# CORS Setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,57 +18,50 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Telegram Config
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 
 def send_telegram_alert(symbol, signal_type, price, rsi, ema_status, sl, tp1, tp2):
     if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN":
-        print("Telegram Token not set.")
         return
     
     emoji = "🚀 BUY SIGNAL" if signal_type == "BUY" else "🔻 SELL SIGNAL"
     message = f"""
-{emoji} | *Jio AI Engine V4.0*
+{emoji} | *Jio AI Engine V4.1*
 ----------------------------------
 🎯 *Asset:* {symbol}
 📊 *Entry Price:* ${price:.4f}
 📈 *RSI (14):* {rsi:.2f}
 📉 *Trend Confirmation:* {ema_status}
 
-🛑 *Stop Loss (ATR Based):* ${sl:.4f}
-🎯 *Target 1 (1:1.5):* ${tp1:.4f}
-🚀 *Target 2 (1:3.0):* ${tp2:.4f}
+🛑 *Stop Loss (ATR):* ${sl:.4f}
+🎯 *Target 1:* ${tp1:.4f}
+🚀 *Target 2:* ${tp2:.4f}
 ----------------------------------
-⚡ High-Probability Institutional Signal
+⚡ Institutional Signal
 """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"})
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=5)
     except Exception as e:
-        print(f"Error sending Telegram alert: {e}")
+        print(f"Telegram Error: {e}")
 
-# Quantitative Indicator Logic
 def calculate_indicators(df):
-    # 1. EMAs
     df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
     df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
     df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
     
-    # 2. RSI (14)
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / (loss + 1e-9)
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # 3. MACD
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
     df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
     
-    # 4. ATR (Volatility Stop Loss)
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
     low_close = np.abs(df['Low'] - df['Close'].shift())
@@ -77,21 +69,24 @@ def calculate_indicators(df):
     true_range = np.max(ranges, axis=1)
     df['ATR'] = true_range.rolling(14).mean()
     
-    # 5. Volume Average
     df['Vol_Avg'] = df['Volume'].rolling(20).mean()
     return df
 
-# Advanced Signal Logic Rules
 def analyze_asset(ticker):
     try:
-        # Fetch 1-hour candle data
-        df = yf.download(ticker, period="7d", interval="1h", progress=False)
+        # Rate-limit safety: safe single-threaded download
+        time.sleep(0.5) 
+        df = yf.download(ticker, period="7d", interval="1h", progress=False, threads=False)
+        
         if df.empty or len(df) < 50:
             return {"symbol": ticker, "status": "Insufficient Data"}
             
+        # Fix MultiIndex columns if returned by yfinance
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
         df = calculate_indicators(df)
         curr = df.iloc[-1]
-        prev = df.iloc[-2]
         
         close = float(curr['Close'])
         rsi = float(curr['RSI'])
@@ -107,29 +102,22 @@ def analyze_asset(ticker):
         signal = "NEUTRAL"
         ema_status = "RANGING"
         
-        # Bullish Institutional Rule Set
-        # Rule 1: Price > 200 EMA (Uptrend)
-        # Rule 2: EMA 20 > EMA 50
-        # Rule 3: RSI between 52 and 68 (Strong momentum without overbought)
-        # Rule 4: Volume > 1.3x Vol_Avg (Breakout confirmation)
-        # Rule 5: MACD Crossover
         if close > ema200 and ema20 > ema50:
             ema_status = "BULLISH TREND"
-            if rsi > 52 and rsi < 68 and macd > signal_line and vol > (1.2 * vol_avg):
+            if rsi > 50 and macd > signal_line:
                 signal = "BUY"
                 sl = close - (1.5 * atr)
-                tp1 = close + (2.2 * atr)
-                tp2 = close + (4.0 * atr)
+                tp1 = close + (2.0 * atr)
+                tp2 = close + (3.5 * atr)
                 send_telegram_alert(ticker, "BUY", close, rsi, ema_status, sl, tp1, tp2)
                 
-        # Bearish Institutional Rule Set
         elif close < ema200 and ema20 < ema50:
             ema_status = "BEARISH TREND"
-            if rsi < 48 and rsi > 32 and macd < signal_line and vol > (1.2 * vol_avg):
+            if rsi < 50 and macd < signal_line:
                 signal = "SELL"
                 sl = close + (1.5 * atr)
-                tp1 = close - (2.2 * atr)
-                tp2 = close - (4.0 * atr)
+                tp1 = close - (2.0 * atr)
+                tp2 = close - (3.5 * atr)
                 send_telegram_alert(ticker, "SELL", close, rsi, ema_status, sl, tp1, tp2)
                 
         return {
@@ -137,23 +125,20 @@ def analyze_asset(ticker):
             "price": round(close, 4),
             "signal": signal,
             "trend": ema_status,
-            "rsi": round(rsi, 2),
-            "volume_spike": "YES" if vol > (1.2 * vol_avg) else "NORMAL"
+            "rsi": round(rsi, 2)
         }
     except Exception as e:
         return {"symbol": ticker, "status": f"Error: {str(e)}"}
 
 @app.get("/")
 def root():
-    return {"status": "Online", "engine": "Jio Institutional AI Engine V4.0"}
+    return {"status": "Online", "engine": "Jio Institutional AI Engine V4.1"}
 
 @app.get("/api/signals")
 def get_signals():
     tickers = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "SHIB-USD", "^NSEI"]
     results = []
-    
-    # Parallel processing using Multi-threading to avoid stuck loops
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        results = list(executor.map(analyze_asset, tickers))
-        
+    # Loop one by one safely without locking db or hitting rate limits
+    for t in tickers:
+        results.append(analyze_asset(t))
     return {"timestamp": time.strftime("%Y-%m-%d %H:%M:%S"), "signals": results}

@@ -7,7 +7,7 @@ import yfinance as yf
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Jio Institutional AI Trading Engine V4.2")
+app = FastAPI(title="Jio Institutional AI Trading Engine V4.3")
 
 # CORS Setup for Vercel Frontend
 app.add_middleware(
@@ -47,7 +47,7 @@ def send_telegram_alert(symbol, signal_type, price, rsi, ema_status, sl, tp1, tp
     
     emoji = "🚀 BUY SIGNAL" if signal_type == "BUY" else "🔻 SELL SIGNAL"
     message = f"""
-{emoji} | *Jio AI Engine V4.2*
+{emoji} | *Jio AI Engine V4.3*
 ----------------------------------
 🎯 *Asset:* {symbol}
 📊 *Entry Price:* ${p_str}
@@ -148,12 +148,10 @@ def analyze_asset(ticker):
 
 @app.get("/")
 def root():
-    return {"status": "Online", "engine": "Jio Institutional AI Engine V4.2"}
+    return {"status": "Online", "engine": "Jio Institutional AI Engine V4.3"}
 
 @app.get("/api/signals")
 def get_signals():
     tickers = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "SHIB-USD", "^NSEI"]
-    results = []
-    for t in tickers:
-        results.append(analyze_asset(t))
+    results = [analyze_asset(t) for t in tickers]
     return results

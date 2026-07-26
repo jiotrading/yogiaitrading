@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Jio Institutional AI Trading Engine V4.2")
 
-# CORS Setup
+# CORS Setup for Vercel Frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,11 +21,25 @@ app.add_middleware(
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 
+# Alert cooldown to prevent Telegram spamming
+last_alert_time = {}
+ALERT_COOLDOWN = 1800  # 30 Minutes Cooldown
+
 def send_telegram_alert(symbol, signal_type, price, rsi, ema_status, sl, tp1, tp2):
     if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN":
         return
     
-    # SHIB जैसे माइक्रो-प्राइस के लिए 8 डेसिमल, बाकी के लिए 4 डेसिमल
+    current_time = time.time()
+    # Check cooldown per symbol
+    if symbol in last_alert_time:
+        if current_time - last_alert_time[symbol] < ALERT_COOLDOWN:
+            print(f"Skipping spam alert for {symbol}. Cooldown active.")
+            return
+
+    # Update timestamp
+    last_alert_time[symbol] = current_time
+
+    # Decimal formatting: 8 decimals for Micro-price tokens like SHIB
     p_str = f"{price:.8f}" if "SHIB" in symbol else f"{price:.4f}"
     sl_str = f"{sl:.8f}" if "SHIB" in symbol else f"{sl:.4f}"
     tp1_str = f"{tp1:.8f}" if "SHIB" in symbol else f"{tp1:.4f}"
@@ -142,4 +156,4 @@ def get_signals():
     results = []
     for t in tickers:
         results.append(analyze_asset(t))
-    return {"timestamp": time.strftime("%Y-%m-%d %H:%M:%S"), "signals": results}
+    return results

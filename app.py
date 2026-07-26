@@ -7,7 +7,7 @@ import yfinance as yf
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Jio Institutional AI Trading Engine V4.1")
+app = FastAPI(title="Jio Institutional AI Trading Engine V4.2")
 
 # CORS Setup
 app.add_middleware(
@@ -25,18 +25,24 @@ def send_telegram_alert(symbol, signal_type, price, rsi, ema_status, sl, tp1, tp
     if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN":
         return
     
+    # SHIB जैसे माइक्रो-प्राइस के लिए 8 डेसिमल, बाकी के लिए 4 डेसिमल
+    p_str = f"{price:.8f}" if "SHIB" in symbol else f"{price:.4f}"
+    sl_str = f"{sl:.8f}" if "SHIB" in symbol else f"{sl:.4f}"
+    tp1_str = f"{tp1:.8f}" if "SHIB" in symbol else f"{tp1:.4f}"
+    tp2_str = f"{tp2:.8f}" if "SHIB" in symbol else f"{tp2:.4f}"
+    
     emoji = "🚀 BUY SIGNAL" if signal_type == "BUY" else "🔻 SELL SIGNAL"
     message = f"""
-{emoji} | *Jio AI Engine V4.1*
+{emoji} | *Jio AI Engine V4.2*
 ----------------------------------
 🎯 *Asset:* {symbol}
-📊 *Entry Price:* ${price:.4f}
+📊 *Entry Price:* ${p_str}
 📈 *RSI (14):* {rsi:.2f}
 📉 *Trend Confirmation:* {ema_status}
 
-🛑 *Stop Loss (ATR):* ${sl:.4f}
-🎯 *Target 1:* ${tp1:.4f}
-🚀 *Target 2:* ${tp2:.4f}
+🛑 *Stop Loss (ATR):* ${sl_str}
+🎯 *Target 1:* ${tp1_str}
+🚀 *Target 2:* ${tp2_str}
 ----------------------------------
 ⚡ Institutional Signal
 """
@@ -74,14 +80,12 @@ def calculate_indicators(df):
 
 def analyze_asset(ticker):
     try:
-        # Rate-limit safety: safe single-threaded download
         time.sleep(0.5) 
         df = yf.download(ticker, period="7d", interval="1h", progress=False, threads=False)
         
         if df.empty or len(df) < 50:
             return {"symbol": ticker, "status": "Insufficient Data"}
             
-        # Fix MultiIndex columns if returned by yfinance
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
@@ -95,8 +99,6 @@ def analyze_asset(ticker):
         ema20 = float(curr['EMA_20'])
         ema50 = float(curr['EMA_50'])
         ema200 = float(curr['EMA_200'])
-        vol = float(curr['Volume'])
-        vol_avg = float(curr['Vol_Avg'])
         atr = float(curr['ATR'])
         
         signal = "NEUTRAL"
@@ -122,7 +124,7 @@ def analyze_asset(ticker):
                 
         return {
             "symbol": ticker,
-            "price": round(close, 4),
+            "price": round(close, 8) if "SHIB" in ticker else round(close, 4),
             "signal": signal,
             "trend": ema_status,
             "rsi": round(rsi, 2)
@@ -132,13 +134,12 @@ def analyze_asset(ticker):
 
 @app.get("/")
 def root():
-    return {"status": "Online", "engine": "Jio Institutional AI Engine V4.1"}
+    return {"status": "Online", "engine": "Jio Institutional AI Engine V4.2"}
 
 @app.get("/api/signals")
 def get_signals():
     tickers = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "SHIB-USD", "^NSEI"]
     results = []
-    # Loop one by one safely without locking db or hitting rate limits
     for t in tickers:
         results.append(analyze_asset(t))
     return {"timestamp": time.strftime("%Y-%m-%d %H:%M:%S"), "signals": results}
